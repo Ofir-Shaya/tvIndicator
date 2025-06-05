@@ -1,0 +1,227 @@
+// @version=6
+strategy("OfirGever123", shorttitle="Ofir",overlay=true,precision=0,default_qty_type=strategy.percent_of_equity, default_qty_value=44,initial_capital=10000,pyramiding=1 )
+
+var GRP_MOMVOL = "1. Momentum/Volatility Engine"
+lenRSI_Engine = input.int(14, title="RSI Length (Momentum Engine)", group=GRP_MOMVOL, tooltip="Lookback period for the RSI calculation used in the momentum engine.")
+lenVolSMA_Engine = input.int(20, title="Volume SMA Length (Momentum Engine)", group=GRP_MOMVOL, tooltip="Lookback period for the Simple Moving Average of volume (or dollar-volume).")
+volumeMultiplierInput = input.float(1.0, title="Dollar-Volume Multiplier (vs SMA)", minval=0.1, step=0.1, group=GRP_MOMVOL, tooltip="Current dollar-volume must be > (SMA of dollar-volume * Multiplier) for trade signal confirmation.")
+lenADX_Engine = input.int(14, title="ADX Length (Trend Strength)", group=GRP_MOMVOL, tooltip="Lookback period for the ADX calculation.")
+adxPercentileLookbackInput = input.int(100, title="ADX Percentile Lookback", group=GRP_MOMVOL, tooltip="Number of bars to look back for calculating the ADX percentile.")
+adxPercentileInput = input.int(80, title="ADX Strength Percentile", minval=1, maxval=99, group=GRP_MOMVOL, tooltip="ADX must be above this percentile of its recent values to be considered 'strong'.")
+rsiTradeBullThreshold = input.float(50.0, title="RSI Trade Bull Threshold (>)", group=GRP_MOMVOL, tooltip="RSI must be above this value for a bullish trade signal.")
+rsiPreBullRSIThreshold = input.float(45.0, title="Pre-Bull RSI Lower Threshold (>)", group=GRP_MOMVOL, tooltip="RSI must be above this for a 'Light Blue' pre-bullish hint candle.")
+rsiTradeBearThreshold = input.float(50.0, title="RSI Trade Bear Threshold (<)", group=GRP_MOMVOL, tooltip="RSI must be below this value for a bearish trade signal.")
+len52WeekInput = input.int(260, title="52-Week Lookback Period (Daily Bars)", group=GRP_MOMVOL, tooltip="Number of daily bars (approx. 1 year) to determine 52-week highs/lows.")
+
+var GRP_ADAPTMA = "1.2. Adaptive MA Settings"
+useAdaptiveMAsInput = input.bool(false, title="Use Adaptive MA Lengths?", group=GRP_ADAPTMA, tooltip="If true, MA lengths will adjust based on volatility (ATR).")
+baseMA50LenInput = input.int(50, title="Base MA50 Length", group=GRP_ADAPTMA, tooltip="Base length for the shorter MA if adaptive MAs are off, or the base for adaptation.")
+baseMA200LenInput = input.int(200, title="Base MA200 Length", group=GRP_ADAPTMA, tooltip="Base length for the longer MA if adaptive MAs are off, or the base for adaptation.")
+atrPeriodForAdaptMA = input.int(14, title="ATR Period for MA Adaptation", group=GRP_ADAPTMA, tooltip="ATR lookback used to measure volatility for adapting MA lengths.")
+adaptiveMASensitivity = input.float(0.5, title="Adaptive MA Sensitivity", minval=0.05, maxval=2.0, step=0.05, group=GRP_ADAPTMA, tooltip="Controls how much MA lengths respond to volatility. Higher = more responsive/shorter lengths in high vol.")
+minAdaptiveMA50Len = input.int(10, title="Min Adaptive MA50 Length", group=GRP_ADAPTMA, tooltip="Minimum allowed length for the adaptive MA50.")
+minAdaptiveMA200Len = input.int(50, title="Min Adaptive MA200 Length", group=GRP_ADAPTMA, tooltip="Minimum allowed length for the adaptive MA200.")
+
+var GRP_CANDLE = "2. Smart Candle Overlay"
+conflictGatePctInput = input.float(0.5, title="Conflict Paint MA Diff % Gate", minval=0.01, maxval=5.0, step=0.01, group=GRP_CANDLE, tooltip="Maximum percentage difference between MAs for 'Conflict' candles to appear when momentum is neutral.")
+
+float atrValForAdaptMA = ta.atr(atrPeriodForAdaptMA)
+float normAtrForAdaptMA = atrValForAdaptMA / close
+float avgNormAtrForAdaptMA = ta.sma(normAtrForAdaptMA, 50)
+float volatilityRatioForAdaptMA = nz(avgNormAtrForAdaptMA / normAtrForAdaptMA, 1.0)
+float adjustedVolatilityRatio = 1 + (volatilityRatioForAdaptMA - 1) * adaptiveMASensitivity
+int calculatedMA50Len = math.round(baseMA50LenInput * adjustedVolatilityRatio)
+int calculatedMA200Len = math.round(baseMA200LenInput * adjustedVolatilityRatio)
+int finalMA50Len = useAdaptiveMAsInput ? math.max(minAdaptiveMA50Len, calculatedMA50Len) : baseMA50LenInput
+int finalMA200Len = useAdaptiveMAsInput ? math.max(minAdaptiveMA200Len, math.max(finalMA50Len + 10, calculatedMA200Len)) : baseMA200LenInput
+
+ma50 = ta.sma(close, finalMA50Len)
+ma200 = ta.sma(close, finalMA200Len)
+
+rsiEngine = ta.rsi(close, lenRSI_Engine)
+dollarVolume = close * volume
+dollarVolSMA_Engine = ta.sma(dollarVolume, lenVolSMA_Engine)
+
+bool volumeConfirmed = dollarVolume > (dollarVolSMA_Engine * volumeMultiplierInput)
+
+[diPlus, diMinus, adxEngineVal] = ta.dmi(lenADX_Engine, lenADX_Engine)
+adxThreshold_Engine = ta.percentile_linear_interpolation(adxEngineVal, adxPercentileLookbackInput, adxPercentileInput)
+
+dailyHigh = request.security(syminfo.tickerid, "D", high, lookahead=barmerge.lookahead_off)
+dailyLow = request.security(syminfo.tickerid, "D", low, lookahead=barmerge.lookahead_off)
+highest52Wk_D = ta.highest(dailyHigh, len52WeekInput)
+lowest52Wk_D = ta.lowest(dailyLow, len52WeekInput)
+
+bool break52WkHigh = high > highest52Wk_D[1]
+bool break52WkLow = low < lowest52Wk_D[1]
+
+bool tradeBullConditionMet = close > ma50 and rsiEngine > rsiTradeBullThreshold and volumeConfirmed
+bool tradeBearConditionMet = close < ma50 and rsiEngine < rsiTradeBearThreshold and volumeConfirmed
+
+bool trendBullRawCondition = ma50 > ma200
+bool trendBearRawCondition = ma50 < ma200
+
+bool tradeBullActive = tradeBullConditionMet
+bool tradeBearActive = tradeBearConditionMet
+
+var bool tradeBullActive_prev = false
+var bool tradeBearActive_prev = false
+if bar_index > 0
+    tradeBullActive_prev := tradeBullActive[1]
+    tradeBearActive_prev := tradeBearActive[1]
+else
+    tradeBullActive_prev := false
+    tradeBearActive_prev := false
+
+varip bool inBullPhaseActive = false
+varip bool inBearPhaseActive = false
+
+int momentumValue = 0
+if break52WkHigh and (close > ma50) and trendBullRawCondition
+    momentumValue := 3
+else if break52WkLow and (close < ma50) and trendBearRawCondition
+    momentumValue := -3
+else if tradeBullActive and trendBullRawCondition
+    momentumValue := adxEngineVal > adxThreshold_Engine ? 2 : 1
+else if tradeBearActive and trendBearRawCondition
+    momentumValue := adxEngineVal > adxThreshold_Engine ? -2 : -1
+
+color breakoutBullColor = color.rgb(0, 255, 0)
+color strongBullColor = color.rgb(0, 180, 0)
+color standardBullColor = color.rgb(0, 128, 0)
+color breakoutBearColor = color.rgb(255, 0, 0)
+color strongBearColor = color.rgb(200, 0, 0)
+color standardBearColor = color.rgb(139, 0, 0)
+color baseGray = color.rgb(128, 128, 128)
+
+var table convictionStatusTable = table.new(position.top_right, 1, 1, border_width = 1, border_color = color.rgb(100,100,100))
+if barstate.isfirst
+    table.cell(convictionStatusTable, 0, 0, text = "Calculating...", bgcolor = color.new(baseGray, 80), text_color = color.rgb(255,255,255), width = 18, height=2, text_size = size.small, text_halign = text.align_center)
+
+string convictionText = "Neutral / Mixed"
+color convictionBgColor = color.new(baseGray, 70)
+switch momentumValue
+    3 =>
+        convictionText := "BREAKOUT BULLISH"
+        convictionBgColor := color.new(breakoutBullColor, 70)
+    2 =>
+        convictionText := "Strong Bullish"
+        convictionBgColor := color.new(strongBullColor, 70)
+    1 =>
+        convictionText := "Weak Bullish"
+        convictionBgColor := color.new(standardBullColor, 70)
+    -1 =>
+        convictionText := "Weak Bearish"
+        convictionBgColor := color.new(standardBearColor, 70)
+    -2 =>
+        convictionText := "Strong Bearish"
+        convictionBgColor := color.new(strongBearColor, 70)
+    -3 =>
+        convictionText := "BREAKDOWN BEARISH"
+        convictionBgColor := color.new(breakoutBearColor, 70)
+if barstate.islast
+    table.cell_set_text(convictionStatusTable, 0, 0, convictionText)
+    table.cell_set_bgcolor(convictionStatusTable, 0, 0, convictionBgColor)
+
+bool isFlipToTradeBull = tradeBullActive and not tradeBullActive_prev
+bool isFlipToTradeBear = tradeBearActive and not tradeBearActive_prev
+int prevMomentumValue = bar_index == 0 ? 0 : nz(momentumValue[1], 0)
+bool prevContextWasBearish = prevMomentumValue <= 0
+bool prevInBullPhaseActive = bar_index == 0 ? false : inBullPhaseActive[1]
+bool prevInBearPhaseActive = bar_index == 0 ? false : inBearPhaseActive[1]
+bool isBlueCandleCondition = isFlipToTradeBull and prevContextWasBearish and (not prevInBullPhaseActive or prevInBearPhaseActive) // Implicitly declared
+bool prevContextWasBullish = prevMomentumValue >= 0
+bool isPinkCandleCondition = isFlipToTradeBear and prevContextWasBullish and (not prevInBearPhaseActive or prevInBullPhaseActive) // Implicitly declared
+
+if isBlueCandleCondition
+    inBullPhaseActive := true
+    inBearPhaseActive := false
+if isPinkCandleCondition
+    inBearPhaseActive := true
+    inBullPhaseActive := false
+
+bool showConflictPaintGate = (math.abs(ma50 - ma200) / close) * 100 < conflictGatePctInput
+isSignalConflictForPaint = momentumValue == 0 and showConflictPaintGate
+
+bool isLightBluePreSignal = false
+if not isBlueCandleCondition and not isPinkCandleCondition and not isSignalConflictForPaint and not inBullPhaseActive and not inBearPhaseActive and momentumValue == 0
+    bool prevCloseBelowMA50 = bar_index == 0 ? true : (na(close[1]) ? true : close[1] <= ma50[1])
+    if (close > ma50 and rsiEngine > rsiPreBullRSIThreshold and rsiEngine < rsiTradeBullThreshold and not tradeBullActive) or (close > ma50 and prevCloseBelowMA50 and not tradeBullActive)
+        isLightBluePreSignal := true
+
+color candleBreakoutBull = color.rgb(0, 255, 0)
+color candleStrongBull = color.rgb(0, 180, 0)
+color candleStandardBull = color.rgb(0, 128, 0)
+color candleBreakoutBear = color.rgb(255, 0, 0)
+color candleStrongBear = color.rgb(200, 0, 0)
+color candleStandardBear = color.rgb(139, 0, 0)
+color candleSignalBlue = color.rgb(0, 0, 255)
+color candleSignalPink = color.rgb(255, 20, 147)
+color candleNeutralGray = color.rgb(128, 128, 128)
+color candleLightBlue = color.rgb(173, 216, 230)
+
+color candleFinalColor = if (isBlueCandleCondition)
+    color.new(candleSignalBlue, 0)
+else if (isPinkCandleCondition)
+    color.new(candleSignalPink, 0)
+else if (isSignalConflictForPaint)
+    if prevInBullPhaseActive
+        color.new(candleStandardBull, 0)
+    else if prevInBearPhaseActive
+        color.new(candleStandardBear, 0)
+    else
+        color.new(candleNeutralGray, 0)
+else if (isLightBluePreSignal)
+    color.new(candleLightBlue, 0)
+else if (inBullPhaseActive)
+    switch momentumValue
+        3 => color.new(candleBreakoutBull, 0)
+        2 => color.new(candleStrongBull, 0)
+        1 => color.new(candleStandardBull, 0)
+        => color.new(candleStandardBull, 0)
+else if (inBearPhaseActive)
+    switch momentumValue
+        -3 => color.new(candleBreakoutBear, 0)
+        -2 => color.new(candleStrongBear, 0)
+        -1 => color.new(candleStandardBear, 0)
+        => color.new(candleStandardBear, 0)
+else
+    switch momentumValue
+        3 => color.new(breakoutBullColor, 0)
+        2 => color.new(strongBullColor, 0)
+        1 => color.new(standardBullColor, 0)
+        -1 => color.new(standardBearColor, 0)
+        -2 => color.new(strongBearColor, 0)
+        -3 => color.new(breakoutBearColor, 0)
+        =>
+            if close > open
+                color.new(candleStandardBull, 0)
+            else if close < open
+                color.new(standardBearColor, 0)
+            else
+                color.new(candleNeutralGray, 0)
+
+barcolor(candleFinalColor, title="Smart Colored Candles")
+
+bool isBullArrowCue = candleFinalColor == color.new(candleSignalBlue, 0) and (momentumValue == 2 or momentumValue == 3)
+varip bool inTradeLong_visual = false
+if isBullArrowCue
+    inTradeLong_visual := true
+bool exitLongSignal_visual = inTradeLong_visual[1] and momentumValue <= 0 and momentumValue[1] > 0
+if exitLongSignal_visual
+    inTradeLong_visual := false
+plotshape(isBullArrowCue, title="Bull Entry Cue", location=location.belowbar, color=color.new(candleSignalBlue, 0), style=shape.triangleup, size=size.large, text="▲")
+plotshape(exitLongSignal_visual, title="Exit Long Cue", location=location.abovebar, color=color.new(color.red, 0), style=shape.xcross, size=size.normal, text="X L")
+
+bool initialLongEntryStratCond = isBlueCandleCondition
+bool addLongStratCond = inBullPhaseActive and candleFinalColor == color.new(standardBullColor,0) and strategy.position_size > 0
+bool closeLongStratCond = isPinkCandleCondition
+
+if (initialLongEntryStratCond and strategy.position_size == 0)
+    strategy.entry("L_Initial", strategy.long, comment="Initial Long on Blue")
+
+if (addLongStratCond) // Pyramiding is allowed by strategy setting
+    strategy.entry("L_Add", strategy.long, comment="Add Long on StdGreen")
+
+if (closeLongStratCond and strategy.position_size > 0)
+    strategy.close_all(comment="Close All Longs on Pink")
