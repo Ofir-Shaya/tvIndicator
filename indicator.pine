@@ -44,11 +44,14 @@ ma50 = ta.sma(close, finalMA50Len)
 ma200 = ta.sma(close, finalMA200Len)
 
 // Short-term moving averages used for blue/pink candle logic
-float volRatio = volume / ta.sma(volume, lenVolSMA_Engine)
+// Ensure volume-based calculations have a fallback so the SMA length never becomes NaN
+float volSMA = ta.sma(volume, lenVolSMA_Engine)
+float volRatio = nz(volume / volSMA, 1.0)
 float volFactor = math.min(volRatio, 1.5) / 1.5
 int midMALen = math.round(midMAMaxLenInput - (midMAMaxLenInput - midMAMinLenInput) * volFactor)
+int midMALenValid = math.max(1, midMALen)
 maShort = ta.sma(close, shortMALenInput)
-maMid = ta.sma(close, midMALen)
+maMid = ta.sma(close, midMALenValid)
 
 rsiEngine = ta.rsi(close, lenRSI_Engine)
 dollarVolume = close * volume
