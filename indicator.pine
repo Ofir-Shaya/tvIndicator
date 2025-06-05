@@ -1,5 +1,5 @@
 // @version=6
-strategy("OfirGever123", shorttitle="Ofir",overlay=true,precision=0,default_qty_type=strategy.percent_of_equity, default_qty_value=44,initial_capital=10000,pyramiding=1 )
+indicator("OfirGever123", shorttitle="Ofir", overlay=true, precision=0)
 
 var GRP_MOMVOL = "1. Momentum/Volatility Engine"
 lenRSI_Engine = input.int(14, title="RSI Length (Momentum Engine)", group=GRP_MOMVOL, tooltip="Lookback period for the RSI calculation used in the momentum engine.")
@@ -12,6 +12,11 @@ rsiTradeBullThreshold = input.float(50.0, title="RSI Trade Bull Threshold (>)", 
 rsiPreBullRSIThreshold = input.float(45.0, title="Pre-Bull RSI Lower Threshold (>)", group=GRP_MOMVOL, tooltip="RSI must be above this for a 'Light Blue' pre-bullish hint candle.")
 rsiTradeBearThreshold = input.float(50.0, title="RSI Trade Bear Threshold (<)", group=GRP_MOMVOL, tooltip="RSI must be below this value for a bearish trade signal.")
 len52WeekInput = input.int(260, title="52-Week Lookback Period (Daily Bars)", group=GRP_MOMVOL, tooltip="Number of daily bars (approx. 1 year) to determine 52-week highs/lows.")
+
+var GRP_SHORTMA = "1.1. Short-Term MA Settings"
+shortMALenInput = input.int(10, title="Short MA Length", group=GRP_SHORTMA, tooltip="Used for fast trend changes (e.g., 10 day).")
+midMAMinLenInput = input.int(20, title="Mid MA Min Length", group=GRP_SHORTMA, tooltip="Minimum length for the volume-adjusted MA.")
+midMAMaxLenInput = input.int(50, title="Mid MA Max Length", group=GRP_SHORTMA, tooltip="Maximum length for the volume-adjusted MA.")
 
 var GRP_ADAPTMA = "1.2. Adaptive MA Settings"
 useAdaptiveMAsInput = input.bool(false, title="Use Adaptive MA Lengths?", group=GRP_ADAPTMA, tooltip="If true, MA lengths will adjust based on volatility (ATR).")
@@ -37,6 +42,13 @@ int finalMA200Len = useAdaptiveMAsInput ? math.max(minAdaptiveMA200Len, math.max
 
 ma50 = ta.sma(close, finalMA50Len)
 ma200 = ta.sma(close, finalMA200Len)
+
+// Short-term moving averages used for blue/pink candle logic
+float volRatio = volume / ta.sma(volume, lenVolSMA_Engine)
+float volFactor = math.min(volRatio, 1.5) / 1.5
+int midMALen = math.round(midMAMaxLenInput - (midMAMaxLenInput - midMAMinLenInput) * volFactor)
+maShort = ta.sma(close, shortMALenInput)
+maMid = ta.sma(close, midMALen)
 
 rsiEngine = ta.rsi(close, lenRSI_Engine)
 dollarVolume = close * volume
@@ -129,9 +141,14 @@ int prevMomentumValue = bar_index == 0 ? 0 : nz(momentumValue[1], 0)
 bool prevContextWasBearish = prevMomentumValue <= 0
 bool prevInBullPhaseActive = bar_index == 0 ? false : inBullPhaseActive[1]
 bool prevInBearPhaseActive = bar_index == 0 ? false : inBearPhaseActive[1]
-bool isBlueCandleCondition = isFlipToTradeBull and prevContextWasBearish and (not prevInBullPhaseActive or prevInBearPhaseActive) // Implicitly declared
+bool volHighForSignal = volume > ta.sma(volume, lenVolSMA_Engine)
+bool maShortSlopeUp = ta.rising(maShort, 2)
+bool maShortSlopeDown = ta.falling(maShort, 2)
+bool bullShortSmart = maShort > maMid and maShortSlopeUp and volHighForSignal
+bool bearShortSmart = maShort < maMid and maShortSlopeDown and volHighForSignal
+bool isBlueCandleCondition = isFlipToTradeBull and prevContextWasBearish and (not prevInBullPhaseActive or prevInBearPhaseActive) and bullShortSmart // Upward slope & volume confirm blue candle
 bool prevContextWasBullish = prevMomentumValue >= 0
-bool isPinkCandleCondition = isFlipToTradeBear and prevContextWasBullish and (not prevInBearPhaseActive or prevInBullPhaseActive) // Implicitly declared
+bool isPinkCandleCondition = isFlipToTradeBear and prevContextWasBullish and (not prevInBearPhaseActive or prevInBullPhaseActive) and bearShortSmart // Downward slope & volume confirm pink candle
 
 if isBlueCandleCondition
     inBullPhaseActive := true
@@ -212,16 +229,3 @@ if exitLongSignal_visual
     inTradeLong_visual := false
 plotshape(isBullArrowCue, title="Bull Entry Cue", location=location.belowbar, color=color.new(candleSignalBlue, 0), style=shape.triangleup, size=size.large, text="▲")
 plotshape(exitLongSignal_visual, title="Exit Long Cue", location=location.abovebar, color=color.new(color.red, 0), style=shape.xcross, size=size.normal, text="X L")
-
-bool initialLongEntryStratCond = isBlueCandleCondition
-bool addLongStratCond = inBullPhaseActive and candleFinalColor == color.new(standardBullColor,0) and strategy.position_size > 0
-bool closeLongStratCond = isPinkCandleCondition
-
-if (initialLongEntryStratCond and strategy.position_size == 0)
-    strategy.entry("L_Initial", strategy.long, comment="Initial Long on Blue")
-
-if (addLongStratCond) // Pyramiding is allowed by strategy setting
-    strategy.entry("L_Add", strategy.long, comment="Add Long on StdGreen")
-
-if (closeLongStratCond and strategy.position_size > 0)
-    strategy.close_all(comment="Close All Longs on Pink")
